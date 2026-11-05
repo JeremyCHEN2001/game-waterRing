@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>水压套圈 · 原型</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="stage">
+  <div id="scenery" aria-hidden="true">
+    <div class="sun"></div>
+    <div class="cloud cloud-a"></div>
+    <div class="cloud cloud-b"></div>
+    <div class="cloud cloud-c"></div>
+    <div class="moon"></div>
+    <div class="ribbon ribbon-a"></div>
+    <div class="ribbon ribbon-b"></div>
+    <div class="stars">
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+  </div>
+  <div id="hud">
+    <span id="score">得分 0</span>
+    <span id="progress">0/50</span>
+    <span id="timer">60s</span>
+  </div>
+  <div id="frame">
+    <canvas id="game"></canvas>
+    <div id="toast"></div>
+    <div id="overlay">
+      <div id="card" role="dialog" aria-modal="true" aria-labelledby="cardTitle">
+        <p id="cardKicker" class="hidden"></p>
+        <h1 id="cardTitle"></h1>
+        <div id="cardStats" class="hidden"></div>
+        <p id="cardNote" class="hidden"></p>
+        <div id="cardCount" class="hidden"></div>
+        <div id="cardButtons" class="hidden"></div>
+      </div>
+    </div>
+  </div>
+  <div id="leftRail">
+    <div id="tierLegend" aria-label="圆环档位图例">
+      <div class="tierItem"><span class="tierRing tierRing-10"></span>10</div>
+      <div class="tierItem"><span class="tierRing tierRing-15"></span>15</div>
+      <div class="tierItem"><span class="tierRing tierRing-20"></span>20</div>
+    </div>
+  </div>
+  <div id="rightRail">
+    <button id="btnReset">重开</button>
+    <button id="btnScene" aria-haspopup="true" aria-expanded="false">场景</button>
+    <div id="sceneSwatches" class="hidden" role="menu" aria-label="选择场景">
+      <button class="sceneSwatchBtn" data-scene="day" role="menuitem" aria-label="经典"><span class="sceneSwatch sceneSwatch-day"></span></button>
+      <button class="sceneSwatchBtn" data-scene="night" role="menuitem" aria-label="夜晚"><span class="sceneSwatch sceneSwatch-night"></span></button>
+      <button class="sceneSwatchBtn" data-scene="dragon" role="menuitem" aria-label="龙宫"><span class="sceneSwatch sceneSwatch-dragon"></span></button>
+    </div>
+    <button id="btnSound" aria-pressed="true">音效</button>
+    <button id="btnDebug">调参</button>
+    <button id="btnDev" class="hidden" aria-pressed="false">Dev</button>
+  </div>
+  <div id="hint">点击产生气流</div>
+  <div id="debugPanel" class="hidden">
+    <label>冲击力度 <input type="range" id="pPulse" min="300" max="1100" step="20"></label>
+    <label>横向漂移 <input type="range" id="pSpread" min="0" max="300" step="10"></label>
+    <label>水阻 <input type="range" id="pDrag" min="0.5" max="6" step="0.1"></label>
+  </div>
+</div>
+<script src="game.js"></script>
+</body>
+</html>
