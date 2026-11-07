@@ -6,6 +6,11 @@ const poles = [
 ];
 for (const p of poles) { p.baseY = TANK_BOTTOM; p.topY = p.baseY - p.height; }
 const RING_FLAT = 0.42;
+// 环在水里的净下沉加速度：水阻让它缓慢下沉，而不是像石头一样落底。
+// 配合下面的脉冲力度，一次点击能把池底的环顶到最高柱顶之上。
+const RING_SINK = 200;
+// 气流横向推动系数：点击点离环心越远，环被推开得越快，用来在空中把环“推”到柱顶上方
+const PULSE_STEER = 3.4;
 
 // 环档：孔越小越难套、分越高；颜色族辅助辨识
 const RING_TIERS = [
@@ -23,13 +28,16 @@ const LEVELS = [
 ];
 
 const params = {
-  pulsePower: 620,
-  pulseSpread: 110,
+  pulsePower: 1000,
+  pulseSpread: 26,
   drag: 2.5,
 };
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+// 烟花画在独立的结算层画布上：位于结算遮罩之上、结果卡片之下
+const fxCanvas = document.getElementById('fx');
+const fxCtx = fxCanvas.getContext('2d');
 const stage = document.getElementById('stage');
 const frame = document.getElementById('frame');
 const scoreEl = document.getElementById('score');
@@ -72,6 +80,10 @@ function resize() {
   canvas.height = Math.round(ch * dpr);
   scale = (cw * dpr) / W;
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
+  // 烟花层与游戏画布同尺寸、同缩放
+  fxCanvas.width = canvas.width;
+  fxCanvas.height = canvas.height;
+  fxCtx.setTransform(scale, 0, 0, scale, 0, 0);
 }
 window.addEventListener('resize', resize);
 resize();
@@ -94,6 +106,7 @@ let levelClearedThisRound = false;
 let settledCount = 0;
 let perfectMode = false;
 const fireworks = [];
+const fwFlashes = [];
 let fwBurstsLeft = 0;
 let fwNextAt = 0;
 let scoreToastCount = 0;
@@ -212,6 +225,7 @@ function resetGame() {
   surfaceEnergy = 0;
   pulses.length = 0;
   fireworks.length = 0;
+  fwFlashes.length = 0;
   fwBurstsLeft = 0;
   settledCount = 0;
   perfectMode = false;
@@ -220,6 +234,11 @@ function resetGame() {
   for (const g of dragonGuards) {
     g.anger = 0;
     g.cool = 1;
+    g.strike = 0;
+    g.dashT = 0;
+    g.dashX = 0;
+    g.dashY = 0;
+    g.dashCd = 0;
   }
   bestAtRoundStart = bestScores[LEVELS[levelIndex].id] || 0;
   clearTimeout(scoreToastTimer);
@@ -271,7 +290,7 @@ function checkClear() {
 
 function triggerPerfect() {
   perfectMode = true;
-  fwBurstsLeft = 5;
+  fwBurstsLeft = REDUCED ? 3 : 9;
   fwNextAt = performance.now();
   endRound('perfect');
 }
@@ -607,11 +626,16 @@ function firePulse(x) {
     const dx = ring.x - nx;
     const ad = Math.abs(dx);
     if (ad > 75) continue;
-    const strength = (1 - ad / 75) * (0.45 + 0.55 * heightFactor(ring.y));
-    ring.vy -= (params.pulsePower + Math.random() * 140) * strength;
-    ring.vx += (dx * 2.4 + (Math.random() - 0.5) * params.pulseSpread) * strength;
+    // 正对环心 14px 内给满横向推力，再向两侧衰减，避免差几像素就推不动
+    const falloff = ad <= 14 ? 1 : Math.max(0, 1 - (ad - 14) / 61);
+    // 落在环孔范围内（20px）都能吃满抬升，边缘快速衰减；侧向补气只推不抬
+    const liftFalloff = ad <= 20 ? 1 : Math.max(0, 1 - (ad - 20) / 36);
+    const strength = liftFalloff * liftFalloff * (0.45 + 0.55 * heightFactor(ring.y));
+    ring.vy -= (params.pulsePower + Math.random() * 120) * strength;
+    // 横向推动不随高度衰减，保证在空中也能把环推到柱顶上方
+    ring.vx += (dx * PULSE_STEER + (Math.random() - 0.5) * params.pulseSpread) * falloff;
     // 气流会把环冲得侧翻、打转，不再是永远平躺
-    ring.flipV += (Math.random() - 0.45) * 7 * strength;
+    ring.flipV += (Math.random() - 0.5) * 4 * strength;
   }
 
   // 一团上涌的气泡
@@ -687,7 +711,8 @@ function stepPhysics(dt, now) {
 
     let fx = 0, fy = 0;
 
-    fy += g;
+    // 自由环只受很小的净下沉力（浮力抵消了大部分重力），在水里缓慢下沉
+    fy += RING_SINK;
 
     ring.vx += fx * dt;
     ring.vy += fy * dt;
@@ -727,6 +752,7 @@ function stepPhysics(dt, now) {
     const ringBottom = ring.y + rEff;
     for (const pole of poles) {
       const pdx = ring.x - pole.x;
+
       if (ring.vy > 0 && ringBottom >= pole.topY && ringBottom < pole.topY + 44) {
         if (Math.abs(pdx) < ring.holeR - pole.halfW - 2 && ring.flip < 0.35) {
           ring.state = 'threaded';
@@ -791,14 +817,18 @@ function stepFireworks(dt, now) {
   if (perfectMode && fwBurstsLeft > 0 && now >= fwNextAt) {
     fwBurstsLeft--;
     fwNextAt = now + 380;
+    // 只在结果卡片上下的可见区域爆发：卡片中央会挡住烟花
     const cx = 70 + Math.random() * (W - 140);
-    const cy = 130 + Math.random() * 200;
-    const palette = ['#ffd43b', '#ff6b6b', '#4cc9f0', '#51cf66', '#f783ac', '#ffffff'];
+    const upper = Math.random() < 0.55;
+    const cy = upper ? 108 + Math.random() * 24 : 596 + Math.random() * 30;
+    const palette = ['#ffd43b', '#ff6b6b', '#4cc9f0', '#51cf66', '#f783ac', '#ffe29a', '#ff9f43'];
     const color = palette[Math.floor(Math.random() * palette.length)];
-    for (let i = 0; i < 26; i++) {
-      const a = (i / 26) * Math.PI * 2 + Math.random() * 0.2;
-      const sp = 70 + Math.random() * 130;
-      const life = 0.9 + Math.random() * 0.5;
+    const count = REDUCED ? 22 : 36;
+    fwFlashes.push({ x: cx, y: cy, life: 0.34, max: 0.34, color });
+    for (let i = 0; i < count; i++) {
+      const a = (i / count) * Math.PI * 2 + Math.random() * 0.2;
+      const sp = 70 + Math.random() * 85;
+      const life = 1.15 + Math.random() * 0.55;
       fireworks.push({
         x: cx, y: cy,
         vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
@@ -810,29 +840,67 @@ function stepFireworks(dt, now) {
     const p = fireworks[i];
     p.life -= dt;
     if (p.life <= 0) { fireworks.splice(i, 1); continue; }
-    p.vy += 160 * dt;
+    p.vy += 150 * dt;
     p.vx *= Math.max(0, 1 - 1.2 * dt);
     p.x += p.vx * dt;
     p.y += p.vy * dt;
   }
+  for (let i = fwFlashes.length - 1; i >= 0; i--) {
+    fwFlashes[i].life -= dt;
+    if (fwFlashes[i].life <= 0) fwFlashes.splice(i, 1);
+  }
 }
 
+// 烟花单独画在结算层画布上，使用叠加混合，深色遮罩下更亮
 function drawFireworks() {
+  fxCtx.save();
+  fxCtx.globalCompositeOperation = 'lighter';
+  // 爆发中心的短促闪光
+  for (const f of fwFlashes) {
+    const k = Math.max(0, f.life / f.max);
+    const [r, g, b] = hexToRgb(f.color);
+    const radius = 26 + 46 * (1 - k);
+    const grad = fxCtx.createRadialGradient(f.x, f.y, 0, f.x, f.y, radius);
+    grad.addColorStop(0, `rgba(255, 255, 255, ${0.75 * k})`);
+    grad.addColorStop(0.35, `rgba(${r}, ${g}, ${b}, ${0.5 * k})`);
+    grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+    fxCtx.globalAlpha = 1;
+    fxCtx.fillStyle = grad;
+    fxCtx.beginPath();
+    fxCtx.arc(f.x, f.y, radius, 0, Math.PI * 2);
+    fxCtx.fill();
+  }
   for (const p of fireworks) {
     const a = Math.max(0, Math.min(1, p.life / p.max));
-    ctx.globalAlpha = a;
-    ctx.beginPath();
-    ctx.moveTo(p.x, p.y);
-    ctx.lineTo(p.x - p.vx * 0.03, p.y - p.vy * 0.03);
-    ctx.strokeStyle = p.color;
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 2.2 * a + 0.6, 0, Math.PI * 2);
-    ctx.fillStyle = p.color;
-    ctx.fill();
+    const fade = a * a;
+    fxCtx.globalAlpha = fade * 0.65;
+    fxCtx.beginPath();
+    fxCtx.moveTo(p.x, p.y);
+    fxCtx.lineTo(p.x - p.vx * 0.045, p.y - p.vy * 0.045);
+    fxCtx.strokeStyle = p.color;
+    fxCtx.lineWidth = 1.6;
+    fxCtx.stroke();
+
+    fxCtx.globalAlpha = fade * 0.22;
+    fxCtx.beginPath();
+    fxCtx.arc(p.x, p.y, 5.5 * a + 2, 0, Math.PI * 2);
+    fxCtx.fillStyle = p.color;
+    fxCtx.fill();
+
+    fxCtx.globalAlpha = 0.35 + fade * 0.65;
+    fxCtx.beginPath();
+    fxCtx.arc(p.x, p.y, 2.3 * a + 0.9, 0, Math.PI * 2);
+    fxCtx.fillStyle = p.color;
+    fxCtx.fill();
   }
-  ctx.globalAlpha = 1;
+  fxCtx.restore();
+  fxCtx.globalAlpha = 1;
+  fxCtx.globalCompositeOperation = 'source-over';
+}
+
+function drawFx() {
+  fxCtx.clearRect(0, 0, W, H);
+  if (fireworks.length || fwFlashes.length) drawFireworks();
 }
 
 function stepBubbles(dt, now) {
@@ -1802,37 +1870,110 @@ function drawPalaceLights(now) {
   ctx.restore();
 }
 
-// 虾兵蟹将：各守一根柱子，碰到来犯的圆环就生气弹开
+// 虾兵蟹将：各守一根柱子。巡逻走椭圆/8 字，附近有环会短促扑击；
+// 命中时朝圆环方向打开兵器，并把环沿来路打回去
 const dragonGuards = [
-  { poleIndex: 0, kind: 'shrimp', phase: 0.6, x: 150, y: 460, dir: 1, anger: 0, cool: 0 },
-  { poleIndex: 1, kind: 'crab', phase: 2.4, x: 310, y: 520, dir: -1, anger: 0, cool: 0 },
+  {
+    poleIndex: 0, kind: 'shrimp', phase: 0.6, x: 150, y: 460, dir: 1,
+    anger: 0, cool: 0, strike: 0, strikeAng: 0,
+    dashT: 0, dashX: 0, dashY: 0, dashCd: 0,
+    orbitSpeed: 0.92, rangeX: 40, rangeY: 18, hover: 88, wobble: 2.6,
+  },
+  {
+    poleIndex: 1, kind: 'crab', phase: 2.4, x: 310, y: 520, dir: -1,
+    anger: 0, cool: 0, strike: 0, strikeAng: 0,
+    dashT: 0, dashX: 0, dashY: 0, dashCd: 0,
+    orbitSpeed: 0.64, rangeX: 56, rangeY: 26, hover: 96, wobble: 4.2,
+  },
 ];
 const GUARD_ANGER = 1.0;
 const GUARD_COOLDOWN = 1.2;
+const GUARD_STRIKE = 0.3;
+const GUARD_DASH = 0.36;
+const GUARD_DASH_CD = 1.1;
+
+function startGuardDash(g, target, baseX, baseY) {
+  const dx = target.x - baseX;
+  const dy = target.y - baseY;
+  const d = Math.hypot(dx, dy) || 1;
+  const reach = Math.min(20, d * 0.45);
+  g.dashX = (dx / d) * reach;
+  g.dashY = (dy / d) * reach;
+  g.dashT = GUARD_DASH;
+  g.dashCd = GUARD_DASH_CD;
+  if (target.x !== undefined) g.dir = target.x >= g.x ? 1 : -1;
+}
 
 function stepGuards(dt, now) {
   const t = now / 1000;
   for (const g of dragonGuards) {
     const pole = poles[g.poleIndex];
-    const sweep = t * 0.9 + g.phase;
-    g.x = pole.x + Math.sin(sweep) * 48;
-    g.y = pole.topY + 90 + Math.sin(t * 1.7 + g.phase) * 14;
-    g.dir = Math.cos(sweep) >= 0 ? 1 : -1;
+    const orbit = t * g.orbitSpeed + g.phase;
+    // 椭圆 + 纵向 Lissajous + 漂浮，不再是单调左右扫
+    const baseX = pole.x + Math.cos(orbit) * g.rangeX;
+    const baseY = pole.topY + g.hover
+      + Math.sin(orbit * 1.55 + g.phase) * g.rangeY
+      + Math.sin(t * 2.1 + g.phase * 1.7) * g.wobble;
+
+    // 冲刺/命中期间保持朝向目标，不被轨道速度立刻改回来
+    if (g.dashT <= 0) {
+      const vx = -Math.sin(orbit) * g.rangeX * g.orbitSpeed;
+      g.dir = vx >= 0 ? 1 : -1;
+    }
     g.anger = Math.max(0, g.anger - dt);
     g.cool = Math.max(0, g.cool - dt);
+    g.strike = Math.max(0, g.strike - dt);
+    g.dashCd = Math.max(0, g.dashCd - dt);
+    g.dashT = Math.max(0, g.dashT - dt);
+
+    // 附近有圆环时探身扑一下（只叠加短位移，不改变基础巡逻）
+    if (g.dashT <= 0 && g.dashCd <= 0 && g.cool <= 0) {
+      let target = null;
+      let best = 150;
+      for (const r of rings) {
+        if (r.state !== 'free') continue;
+        const d = Math.hypot(r.x - g.x, r.y - g.y);
+        if (d < best) { best = d; target = r; }
+      }
+      if (target) startGuardDash(g, target, baseX, baseY);
+    }
+
+    const dashK = g.dashT > 0 ? Math.sin((1 - g.dashT / GUARD_DASH) * Math.PI) : 0;
+    g.x = baseX + g.dashX * dashK;
+    g.y = baseY + g.dashY * dashK;
+
     if (g.cool > 0) continue;
     for (const ring of rings) {
       if (ring.state !== 'free') continue;
       if (Math.hypot(ring.x - g.x, ring.y - g.y) > ring.r + 16) continue;
+
+      // 命中：把环沿着它来时的方向打回去
+      const speed = Math.hypot(ring.vx, ring.vy);
+      let nx, ny;
+      if (speed > 30) {
+        nx = -ring.vx / speed;
+        ny = -ring.vy / speed;
+      } else {
+        const dx = ring.x - g.x;
+        const dy = ring.y - g.y;
+        const d = Math.hypot(dx, dy) || 1;
+        nx = dx / d;
+        ny = dy / d;
+      }
+      const power = Math.max(240, Math.min(430, 170 + speed * 0.75));
+      ring.vx = nx * power;
+      ring.vy = ny * power;
+      ring.flipV += (Math.random() - 0.5) * 4;
+
       g.anger = GUARD_ANGER;
       g.cool = GUARD_COOLDOWN;
+      g.strike = GUARD_STRIKE;
+      g.strikeAng = Math.atan2(ring.y - g.y, ring.x - g.x);
+      g.dir = ring.x >= g.x ? 1 : -1;
+      if (g.dashT <= 0) startGuardDash(g, ring, baseX, baseY);
+
       sfx('knock');
       if (!REDUCED) shakeT = 0.25;
-      const offset = ring.x - pole.x;
-      const away = offset !== 0 ? Math.sign(offset) : (g.x >= pole.x ? -1 : 1);
-      ring.vx += away * 260;
-      ring.vy -= 180;
-      ring.flipV += (Math.random() - 0.5) * 4;
       break;
     }
   }
@@ -1842,6 +1983,8 @@ function drawGuards(now) {
   const t = now / 1000;
   for (const g of dragonGuards) {
     const shake = g.anger > 0 ? Math.sin(now / 25) * 2 : 0;
+    // 打击弧画在守卫身后，先画出“张开”的方向，再让蟹钳/三股叉压在上面
+    if (g.strike > 0) drawGuardStrike(g);
     ctx.save();
     ctx.translate(g.x + shake, g.y);
     if (g.kind === 'shrimp') drawShrimp(g, t);
@@ -1849,6 +1992,35 @@ function drawGuards(now) {
     ctx.restore();
     if (g.anger > 0) drawAngerMark(g.x + shake + 13, g.y - 22, g.anger);
   }
+}
+
+// 命中瞬间朝圆环方向张开的打击弧
+function drawGuardStrike(g) {
+  const k = Math.max(0, g.strike / GUARD_STRIKE);
+  const open = Math.sin((1 - k) * Math.PI);
+  if (open <= 0.01) return;
+  ctx.save();
+  ctx.translate(g.x, g.y);
+  ctx.rotate(g.strikeAng);
+  ctx.globalAlpha = Math.min(1, open * 1.5);
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#ffd43b';
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  ctx.arc(0, 0, 31 + (1 - k) * 15, -0.55, 0.55);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255, 246, 214, 0.9)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(0, 0, 39 + (1 - k) * 19, -0.38, 0.38);
+  ctx.stroke();
+  for (const a of [-0.34, 0, 0.34]) {
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * 29, Math.sin(a) * 29);
+    ctx.lineTo(Math.cos(a) * (41 + (1 - k) * 8), Math.sin(a) * (41 + (1 - k) * 8));
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawShrimp(g, t) {
@@ -1933,7 +2105,10 @@ function drawShrimp(g, t) {
     ctx.stroke();
   }
 
-  // 手里的三股小叉：金箍 + 红缨
+  // 手里的三股小叉：金箍 + 红缨；命中时向前递出
+  const thrust = g.strike > 0 ? Math.sin((1 - g.strike / GUARD_STRIKE) * Math.PI) * 6 : 0;
+  ctx.save();
+  ctx.translate(thrust, 0);
   ctx.strokeStyle = '#8a5a12';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -1956,6 +2131,7 @@ function drawShrimp(g, t) {
     ctx.lineTo(17 + dx, -20);
     ctx.stroke();
   }
+  ctx.restore();
 }
 
 function drawCrab(g, t) {
@@ -1999,6 +2175,7 @@ function drawCrab(g, t) {
     ctx.stroke();
   }
 
+  const open = g.strike > 0 ? Math.sin((1 - g.strike / GUARD_STRIKE) * Math.PI) : 0;
   const claw = (sx) => {
     ctx.beginPath();
     ctx.moveTo(sx * 12, 0);
@@ -2015,13 +2192,21 @@ function drawCrab(g, t) {
     ctx.arc(sx * 20, -11, 5.5, 0, Math.PI * 2);
     ctx.fillStyle = c1;
     ctx.fill();
-    ctx.beginPath();
-    ctx.moveTo(sx * 20, -11);
-    ctx.lineTo(sx * 26, -15);
-    ctx.lineTo(sx * 24, -8);
-    ctx.closePath();
-    ctx.fillStyle = c2;
-    ctx.fill();
+    // 上下两片钳：命中时向圆环方向张开
+    const spread = 0.12 + open * 0.64;
+    for (const side of [-1, 1]) {
+      ctx.save();
+      ctx.translate(sx * 20, -11);
+      ctx.rotate(side * spread);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(sx * 8.5, -2.4);
+      ctx.lineTo(sx * 6, 3);
+      ctx.closePath();
+      ctx.fillStyle = c2;
+      ctx.fill();
+      ctx.restore();
+    }
   };
   claw(1);
   claw(-1);
@@ -2461,7 +2646,6 @@ function draw(now) {
 
   drawPulses();
   drawGlassSheen();
-  drawFireworks();
   ctx.restore();
 }
 
@@ -2494,6 +2678,7 @@ function loop(now) {
   if (dragonMode) stepGuards(frameDt, now);
   else stepFish(frameDt, now);
   draw(now);
+  drawFx();
   requestAnimationFrame(loop);
 }
 
