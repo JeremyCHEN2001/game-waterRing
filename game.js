@@ -98,7 +98,15 @@ let theme = 'day';
 let nightMode = false;
 let dragonMode = false;
 let levelIndex = 0;
-let unlockedCount = Math.max(1, parseInt(localStorage.getItem('water-ring-unlocked') || '1', 10));
+function readUnlockedCount() {
+  try {
+    const raw = Number(localStorage.getItem('water-ring-unlocked') || '1');
+    return Number.isInteger(raw) ? Math.max(1, Math.min(LEVELS.length, raw)) : 1;
+  } catch {
+    return 1;
+  }
+}
+let unlockedCount = readUnlockedCount();
 // 开发者模式：仅 ?dev=1 进入时显示入口，正式上线不带参数即隐藏
 const DEV_ENTRY = new URLSearchParams(location.search).has('dev');
 let devMode = false;
@@ -113,7 +121,7 @@ let scoreToastCount = 0;
 let scoreToastTotal = 0;
 let scoreToastTimer = 0;
 
-// title 封面 / brief 关卡简报 / play 对局中 / result 结算
+// title 封面 / brief 关卡简报 / play 对局中 / paused 后台暂停 / result 结算
 const BEST_KEY = 'water-ring-best';
 let phase = 'title';
 let bestScores = readBestScores();
@@ -124,7 +132,14 @@ let countdownTimer = 0;
 function readBestScores() {
   try {
     const parsed = JSON.parse(localStorage.getItem(BEST_KEY) || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    const clean = {};
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return clean;
+    const maxScore = RING_TIERS.reduce((sum, tier, i) => sum + tier.score * TIER_COUNTS[i], 0);
+    for (const level of LEVELS) {
+      const value = parsed[level.id];
+      if (Number.isInteger(value) && value >= 0 && value <= maxScore && value % 5 === 0) clean[level.id] = value;
+    }
+    return clean;
   } catch {
     return {};
   }
@@ -153,37 +168,17 @@ let shakeT = 0;
 const REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function makeRings() {
-  const minY = Math.max(...poles.map(pole => pole.topY)) + 50;
-  let positions = [];
-
-  for (let layoutAttempt = 0; layoutAttempt < 50; layoutAttempt++) {
-    positions = [];
-    let valid = true;
-    for (let i = 0; i < 6 && valid; i++) {
-      let placed = false;
-      for (let attempt = 0; attempt < 200 && !placed; attempt++) {
-        const x = 46 + Math.random() * (W - 92);
-        const y = minY + Math.random() * (TANK_BOTTOM - 50 - minY);
-        placed = positions.every(p => Math.hypot(p.x - x, p.y - y) >= 56);
-        if (placed) {
-          for (const pole of poles) {
-            if (Math.abs(x - pole.x) < 40) {
-              placed = false;
-              break;
-            }
-          }
-        }
-        if (placed) positions.push({ x, y });
-      }
-      valid = placed;
+  // 三条安全水道、每条两环；纵向分层保证间距，无重试或回退布局。
+  const positions = [];
+  for (const x of [76, 230, 354]) {
+    for (const y of [504, 592]) {
+      positions.push({ x: x + (Math.random() - 0.5) * 6, y: y + (Math.random() - 0.5) * 24 });
     }
-    if (valid && positions.some(p => p.x < 120) && positions.some(p => p.x > 280)) break;
-    positions = [];
   }
-
-  if (positions.length !== 6) {
-    positions = [[50, 500], [105, 590], [205, 490], [240, 580], [355, 500], [355, 610]]
-      .map(([x, y]) => ({ x, y }));
+  // 洗牌后分配环档，避免高分环总出现在固定水道。
+  for (let i = positions.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [positions[i], positions[j]] = [positions[j], positions[i]];
   }
   const specs = [];
   RING_TIERS.forEach((tier, ti) => {
@@ -219,6 +214,9 @@ function makeRings() {
 
 function resetGame() {
   makeRings();
+  bubbles.length = 0;
+  splashes.length = 0;
+  shakeT = 0;
   for (const p of poles) p.stack = 0;
   score = 0;
   timeLeft = LEVELS[levelIndex].time;
@@ -291,7 +289,7 @@ function checkClear() {
 function triggerPerfect() {
   perfectMode = true;
   fwBurstsLeft = REDUCED ? 3 : 9;
-  fwNextAt = performance.now();
+  fwNextAt = gameTime;
   endRound('perfect');
 }
 
@@ -453,7 +451,13 @@ function startCountdown() {
   }, 750);
 }
 
+function canEnterLevel(idx) {
+  return Number.isInteger(idx) && idx >= 0 && idx < LEVELS.length && (devMode || idx < unlockedCount);
+}
+
 function startBrief(idx) {
+  if (!canEnterLevel(idx)) return;
+  acc = 0;
   clearInterval(countdownTimer);
   closeSceneMenu();
   levelIndex = idx;
@@ -468,10 +472,26 @@ function startBrief(idx) {
   startCountdown();
 }
 
-// 切后台时暂停简报倒计时，回前台续跑，避免简报自己跳过
+// 后台冻结全部游戏时间；对局返回后由玩家主动继续。
 document.addEventListener('visibilitychange', () => {
+  lastTime = performance.now();
   if (document.hidden) {
     if (phase === 'brief') clearInterval(countdownTimer);
+    if (phase === 'play') {
+      phase = 'paused';
+      setText(cardKicker, '');
+      setText(cardTitle, '已暂停');
+      cardTitle.classList.remove('good', 'bad');
+      setStats([]);
+      setText(cardNote, '准备好后继续，剩余时间已保留');
+      setCardButtons([{ label: '继续游戏', primary: true, onClick: () => {
+        if (document.hidden || phase !== 'paused') return;
+        lastTime = performance.now();
+        phase = 'play';
+        hideOverlay();
+      } }]);
+      showOverlay();
+    }
   } else if (phase === 'brief' && countdownLeft > 0) {
     startCountdown();
   }
@@ -2651,6 +2671,7 @@ function draw(now) {
 
 // ---------- 主循环 ----------
 
+let gameTime = 0;
 let lastTime = performance.now();
 let acc = 0;
 const FIXED_DT = 1 / 120;
@@ -2659,24 +2680,33 @@ function loop(now) {
   const frameDt = Math.min((now - lastTime) / 1000, 0.05);
   lastTime = now;
 
+  if (document.hidden || phase === 'paused') {
+    requestAnimationFrame(loop);
+    return;
+  }
+  gameTime += frameDt * 1000;
+  now = gameTime;
+
   if (phase === 'play') {
     acc += frameDt;
-    while (acc >= FIXED_DT) {
+    while (acc >= FIXED_DT && phase === 'play') {
       stepPhysics(FIXED_DT, now);
       acc -= FIXED_DT;
     }
     timeLeft = Math.max(0, timeLeft - frameDt);
     updateHUD();
-    if (timeLeft === 0) endRound('time');
+    if (timeLeft === 0 && phase === 'play') endRound('time');
   }
 
-  stepBubbles(frameDt, now);
-  stepFireworks(frameDt, now);
-  stepSplashes(frameDt);
-  shakeT = Math.max(0, shakeT - frameDt);
-  for (const r of rings) r.flash = Math.max(0, (r.flash || 0) - frameDt * 2.5);
-  if (dragonMode) stepGuards(frameDt, now);
-  else stepFish(frameDt, now);
+  if (phase !== 'paused') {
+    stepBubbles(frameDt, now);
+    stepFireworks(frameDt, now);
+    stepSplashes(frameDt);
+    shakeT = Math.max(0, shakeT - frameDt);
+    for (const r of rings) r.flash = Math.max(0, (r.flash || 0) - frameDt * 2.5);
+    if (dragonMode) stepGuards(frameDt, now);
+    else stepFish(frameDt, now);
+  }
   draw(now);
   drawFx();
   requestAnimationFrame(loop);
@@ -2742,7 +2772,7 @@ function setTheme(id) {
 function updateSwatchStates() {
   for (const btn of sceneSwatches.querySelectorAll('.sceneSwatchBtn')) {
     const idx = LEVELS.findIndex(level => level.id === btn.dataset.scene);
-    const locked = !devMode && idx >= unlockedCount;
+    const locked = !canEnterLevel(idx);
     btn.classList.toggle('locked', locked);
     btn.classList.toggle('selected', idx === levelIndex);
     btn.setAttribute('aria-disabled', String(locked));
@@ -2764,7 +2794,8 @@ for (const option of sceneSwatches.querySelectorAll('.sceneSwatchBtn')) {
   option.addEventListener('pointerdown', event => {
     event.stopPropagation();
     const idx = LEVELS.findIndex(level => level.id === option.dataset.scene);
-    if (!devMode && idx >= unlockedCount) {
+    if (!canEnterLevel(idx)) {
+      if (idx < 1 || idx >= LEVELS.length) return;
       const prev = LEVELS[idx - 1];
       showToast(`需先通关「${prev.name}」${prev.target} 分`, '#ff6b6b');
       return;

@@ -717,10 +717,30 @@ body.dragon .cardBtn.primary {
 
 /* 横屏/矮屏：收窄留白，保证游戏框可用高度 */
 @media (orientation: landscape) and (max-height: 560px) {
-  #stage { padding: 10px 56px; }
+  #stage { padding: 8px 46px; }
   #leftRail, #rightRail { padding: 40px 0; }
   #hud { top: calc(env(safe-area-inset-top, 0px) + 6px); }
   #hud span { font-size: 12px; padding: 4px 10px; }
+}
+
+/* 小屏手机：将侧栏收窄并减少留白，给游戏画布保留更多宽度 */
+@media (max-width: 520px) {
+  #stage { padding-left: 42px; padding-right: 42px; }
+  #leftRail, #rightRail { width: 34px; }
+  #leftRail { left: 3px; }
+  #rightRail { right: 3px; }
+  #rightRail { gap: 7px; }
+  #rightRail button { min-width: 32px; padding: 7px 2px; font-size: 10px; }
+  #tierLegend { padding: 7px 3px; gap: 5px; }
+  #hud { left: 8px; right: 8px; }
+  #hud span { padding: 5px 9px; font-size: 11px; }
+  #hint { max-width: calc(100% - 20px); font-size: 11px; padding: 6px 10px; }
+}
+
+@media (max-height: 460px) {
+  #stage { padding-top: 36px; padding-bottom: 36px; }
+  #leftRail, #rightRail { padding-top: 34px; padding-bottom: 34px; gap: 5px; }
+  #hint { bottom: calc(env(safe-area-inset-bottom, 0px) + 5px); }
 }
 
 /* 尊重系统减弱动态效果 */
