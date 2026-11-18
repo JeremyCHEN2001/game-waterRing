@@ -23,14 +23,17 @@
 water-ring/
 ├── index.html   # 页面骨架：HUD、侧栏按钮、卡片弹窗、调参面板
 ├── style.css    # 布局与场景氛围（日/夜/龙宫背景、横屏适配、减弱动态媒体查询）
-└── game.js      # 全部游戏逻辑（约 2500 行，单文件）
+├── shared-core.js # 两端共享的关卡、进度、布局和主题配置
+├── game.js      # H5 游戏逻辑与渲染
+├── scripts/sync-wechat.cjs # 同步微信版共用函数
+└── tests/core.test.cjs # 核心规则回归检查
 ```
 
 `game.js` 内部结构：
 
 - **渲染**：Canvas 2D，逻辑分辨率 400×720，按容器等比缩放，`devicePixelRatio` 上限 2；分层绘制（水箱 → 场景装饰 → 鱼群/守卫 → 圆环 → 气泡 → 脉冲 → 玻璃反光）；通关烟花画在独立的结算层 canvas 上，位于遮罩之上、结果卡片之下。
 - **物理**：固定步长 120Hz（`FIXED_DT = 1/120` + 累加器），帧间隔钳制 50ms，保证不同刷新率设备行为一致；圆环为「角度 + 浮力 + 水阻」的简化摆动模型。
-- **状态机**：`title → brief（3 秒倒计时）→ play → result` 四阶段，后台标签页冻结游戏模拟、计时和 Canvas 动画；对局返回前台后点击「继续游戏」，简报倒计时自动续跑。
+- **状态机**：`title → brief → play → result`，对局可进入 `paused` 状态，后台标签页冻结游戏模拟、计时和 Canvas 动画；对局返回前台后点击「继续游戏」，简报倒计时自动续跑。
 - **音频**：WebAudio 实时合成音效（无音频文件），三套主题音色（day 明亮正弦 / night 低沉三角波 / dragon 五声音阶），首次手势时惰性创建 `AudioContext`，静音状态持久化。
 - **可访问性与体验**：`prefers-reduced-motion` 下跳过焦散与震屏；safe-area 适配刘海屏；横屏布局媒体查询；`localStorage` 写入全部 try/catch 保护（隐私模式不崩溃）；ARIA 标注弹窗与按钮。
 - **特效（juice）**：套中时水花粒子 + 环体闪光，龙宫弹守卫时镜头微震，通关烟花。
@@ -57,10 +60,10 @@ npx serve water-ring
 
 ### 线上部署
 
-无构建步骤，将三个文件原样上传到任意静态托管即可：
+无构建步骤，将四个运行文件原样上传到任意静态托管即可：
 
 - **GitHub Pages / Gitee Pages**：推送到仓库后在设置中开启 Pages，源选根目录。
-- **对象存储 / CDN**（OSS、COS 等）：直接上传 `index.html`、`style.css`、`game.js`。
+- **对象存储 / CDN**（OSS、COS 等）：直接上传 `index.html`、`style.css`、`shared-core.js`、`game.js`。
 - **Nginx**：`root` 指向项目目录即可，无需反向代理或后端服务。
 
 浏览器要求：支持 Canvas 2D、WebAudio、`localStorage` 的现代移动端/桌面浏览器（iOS Safari 12+、Android Chrome 等）。
@@ -77,3 +80,18 @@ npx serve water-ring
 - 解锁数只接受整数并限制在 1～关卡总数；最高分只保留已知关卡的有效数值。存储不可用时使用默认进度。
 - 所有关卡入口统一校验索引和解锁权限，开发者模式仅绕过解锁限制。
 - 初始六环使用三条安全水道、上下两层位置，加入小幅随机偏移后洗牌分配环档。保证环间距至少 56、距柱中心至少 40，并覆盖左右两侧；不再随机重试或使用回退布局。
+
+## 跨平台维护与验证
+
+H5 是共享核心及共用物理/场景函数的维护源。微信小游戏通过 CommonJS 加载核心；H5 通过 script 加载，无第三方运行依赖。平台 UI、输入、存储、音频和生命周期保持独立。
+
+```bash
+node --test tests/core.test.cjs
+node scripts/sync-wechat.cjs
+node scripts/sync-wechat.cjs --check
+node --test ../water-ring-wechatgame/tests/runtime.test.cjs
+```
+
+同步脚本更新共享核心和 44 个共用函数，不覆盖微信界面及生命周期。目标目录默认是同级 water-ring-wechatgame，可用 --target=/absolute/path 指定；--check 仅检查一致性。修改共用函数后应同步并运行两端回归。
+
+守卫碰撞与圆环模拟现在采用相同固定步长；连套窗口使用可暂停的游戏时间；环境气泡生成概率按经过时间计算。色彩提亮显式限制 RGB 范围。未对真机帧率做未经测量的性能承诺。

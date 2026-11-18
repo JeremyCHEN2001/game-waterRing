@@ -13,19 +13,8 @@ const RING_SINK = 200;
 const PULSE_STEER = 3.4;
 
 // 环档：孔越小越难套、分越高；颜色族辅助辨识
-const RING_TIERS = [
-  { holeR: 18, score: 10, colors: ['#4cc9f0', '#51cf66', '#b197fc'] },
-  { holeR: 15, score: 15, colors: ['#ff6b6b', '#f783ac'] },
-  { holeR: 12, score: 20, colors: ['#ffd43b'] },
-];
-const TIER_COUNTS = [3, 2, 1];
-
-// 关卡（场景即关卡）：后续新场景在此追加配置
-const LEVELS = [
-  { id: 'day', name: '经典', theme: 'day', target: 50, time: 60, holeShrink: 0 },
-  { id: 'night', name: '夜晚', theme: 'night', target: 60, time: 50, holeShrink: 1 },
-  { id: 'dragon', name: '龙宫', theme: 'dragon', target: 70, time: 45, holeShrink: 1 },
-];
+const Core = WaterRingCore;
+const { RING_TIERS, TIER_COUNTS, LEVELS } = Core;
 
 const params = {
   pulsePower: 1000,
@@ -99,12 +88,7 @@ let nightMode = false;
 let dragonMode = false;
 let levelIndex = 0;
 function readUnlockedCount() {
-  try {
-    const raw = Number(localStorage.getItem('water-ring-unlocked') || '1');
-    return Number.isInteger(raw) ? Math.max(1, Math.min(LEVELS.length, raw)) : 1;
-  } catch {
-    return 1;
-  }
+  try { return Core.normalizeUnlocked(localStorage.getItem('water-ring-unlocked')); } catch { return 1; }
 }
 let unlockedCount = readUnlockedCount();
 // 开发者模式：仅 ?dev=1 进入时显示入口，正式上线不带参数即隐藏
@@ -119,7 +103,7 @@ let fwBurstsLeft = 0;
 let fwNextAt = 0;
 let scoreToastCount = 0;
 let scoreToastTotal = 0;
-let scoreToastTimer = 0;
+let scoreToastUntil = 0;
 
 // title 封面 / brief 关卡简报 / play 对局中 / paused 后台暂停 / result 结算
 const BEST_KEY = 'water-ring-best';
@@ -130,19 +114,7 @@ let unlockedNameThisRound = null;
 let countdownTimer = 0;
 
 function readBestScores() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(BEST_KEY) || '{}');
-    const clean = {};
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return clean;
-    const maxScore = RING_TIERS.reduce((sum, tier, i) => sum + tier.score * TIER_COUNTS[i], 0);
-    for (const level of LEVELS) {
-      const value = parsed[level.id];
-      if (Number.isInteger(value) && value >= 0 && value <= maxScore && value % 5 === 0) clean[level.id] = value;
-    }
-    return clean;
-  } catch {
-    return {};
-  }
+  try { return Core.normalizeScores(localStorage.getItem(BEST_KEY)); } catch { return {}; }
 }
 
 // 隐私模式/配额满时写入会抛异常，不能让它打断结算流程
@@ -168,18 +140,7 @@ let shakeT = 0;
 const REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 function makeRings() {
-  // 三条安全水道、每条两环；纵向分层保证间距，无重试或回退布局。
-  const positions = [];
-  for (const x of [76, 230, 354]) {
-    for (const y of [504, 592]) {
-      positions.push({ x: x + (Math.random() - 0.5) * 6, y: y + (Math.random() - 0.5) * 24 });
-    }
-  }
-  // 洗牌后分配环档，避免高分环总出现在固定水道。
-  for (let i = positions.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [positions[i], positions[j]] = [positions[j], positions[i]];
-  }
+  const positions = Core.makePositions();
   const specs = [];
   RING_TIERS.forEach((tier, ti) => {
     for (let i = 0; i < TIER_COUNTS[ti]; i++) {
@@ -239,7 +200,7 @@ function resetGame() {
     g.dashCd = 0;
   }
   bestAtRoundStart = bestScores[LEVELS[levelIndex].id] || 0;
-  clearTimeout(scoreToastTimer);
+  scoreToastUntil = 0;
   scoreToastCount = 0;
   scoreToastTotal = 0;
   updateHUD();
@@ -262,14 +223,11 @@ function showToast(text, color) {
 }
 
 function announceScore(points) {
+  if (gameTime >= scoreToastUntil) { scoreToastCount = 0; scoreToastTotal = 0; }
   scoreToastCount++;
   scoreToastTotal += points;
+  scoreToastUntil = gameTime + 900;
   showToast(scoreToastCount > 1 ? `连套 ${scoreToastCount} 环! +${scoreToastTotal}` : `套中! +${points}`);
-  clearTimeout(scoreToastTimer);
-  scoreToastTimer = setTimeout(() => {
-    scoreToastCount = 0;
-    scoreToastTotal = 0;
-  }, 900);
 }
 
 // 达到本关通关线即通关；若因此解锁新关卡则返回其名称
@@ -416,6 +374,7 @@ function renderResult(reason) {
 }
 
 function endRound(reason) {
+  if (phase !== 'play') return;
   phase = 'result';
   recordBest();
   renderResult(reason);
@@ -451,8 +410,7 @@ function startCountdown() {
   }, 750);
 }
 
-function canEnterLevel(idx) {
-  return Number.isInteger(idx) && idx >= 0 && idx < LEVELS.length && (devMode || idx < unlockedCount);
+function canEnterLevel(idx) { return Core.canEnterLevel(idx, unlockedCount, devMode);
 }
 
 function startBrief(idx) {
@@ -925,7 +883,7 @@ function drawFx() {
 
 function stepBubbles(dt, now) {
   const t = now / 1000;
-  if (bubbles.length < 60 && Math.random() < 0.5) {
+  if (bubbles.length < 60 && Math.random() < 1 - Math.pow(0.5, dt * 60)) {
     bubbles.push({
       x: 20 + Math.random() * (W - 40),
       y: TANK_BOTTOM - 5,
@@ -959,11 +917,7 @@ function hexToRgb(hex) {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-function shade(hex, amt) {
-  const [r, g, b] = hexToRgb(hex);
-  const f = amt < 0 ? (1 + amt) : 1;
-  const add = amt > 0 ? 255 * amt : 0;
-  return `rgb(${Math.round(r * f + add)},${Math.round(g * f + add)},${Math.round(b * f + add)})`;
+function shade(hex, amt) { return Core.shade(hex, amt);
 }
 
 // 三主题取色：经典 / 夜晚 / 龙宫
@@ -2674,6 +2628,7 @@ function draw(now) {
 let gameTime = 0;
 let lastTime = performance.now();
 let acc = 0;
+let simulationTime = 0;
 const FIXED_DT = 1 / 120;
 
 function loop(now) {
@@ -2690,7 +2645,9 @@ function loop(now) {
   if (phase === 'play') {
     acc += frameDt;
     while (acc >= FIXED_DT && phase === 'play') {
-      stepPhysics(FIXED_DT, now);
+      simulationTime += FIXED_DT * 1000;
+      if (dragonMode) stepGuards(FIXED_DT, simulationTime);
+      stepPhysics(FIXED_DT, simulationTime);
       acc -= FIXED_DT;
     }
     timeLeft = Math.max(0, timeLeft - frameDt);
@@ -2704,8 +2661,7 @@ function loop(now) {
     stepSplashes(frameDt);
     shakeT = Math.max(0, shakeT - frameDt);
     for (const r of rings) r.flash = Math.max(0, (r.flash || 0) - frameDt * 2.5);
-    if (dragonMode) stepGuards(frameDt, now);
-    else stepFish(frameDt, now);
+    if (!dragonMode) stepFish(frameDt, now);
   }
   draw(now);
   drawFx();
